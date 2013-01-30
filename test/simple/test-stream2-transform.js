@@ -26,7 +26,10 @@ var Transform = require('_stream_transform');
 
 // tiny node-tap lookalike.
 var tests = [];
+var count = 0;
+
 function test(name, fn) {
+  count++;
   tests.push([name, fn]);
 }
 
@@ -41,13 +44,49 @@ function run() {
   fn({
     same: assert.deepEqual,
     equal: assert.equal,
-    end: run
+    ok: assert,
+    end: function () {
+      count--;
+      run();
+    }
   });
 }
+
+// ensure all tests have run
+process.on("exit", function () {
+  assert.equal(count, 0);
+});
 
 process.nextTick(run);
 
 /////
+
+test('writable side consumption', function(t) {
+  var tx = new Transform({
+    highWaterMark: 10
+  });
+
+  var transformed = 0;
+  tx._transform = function(chunk, output, cb) {
+    transformed += chunk.length;
+    output(chunk);
+    cb();
+  };
+
+  for (var i = 1; i <= 10; i++) {
+    tx.write(new Buffer(i));
+  }
+  tx.end();
+
+  t.equal(tx._readableState.length, 10);
+  t.equal(transformed, 10);
+  t.equal(tx._transformState.writechunk.length, 5);
+  t.same(tx._writableState.buffer.map(function(c) {
+    return c[0].length;
+  }), [6, 7, 8, 9, 10]);
+
+  t.end();
+});
 
 test('passthrough', function(t) {
   var pt = new PassThrough();
@@ -215,35 +254,40 @@ test('passthrough event emission', function(t) {
   var i = 0;
 
   pt.write(new Buffer('foog'));
+
+  console.error('need emit 0');
   pt.write(new Buffer('bark'));
+
+  console.error('should have emitted readable now 1 === %d', emits);
+  t.equal(emits, 1);
 
   t.equal(pt.read(5).toString(), 'foogb');
   t.equal(pt.read(5) + '', 'null');
 
-  console.error('need emit 0');
+  console.error('need emit 1');
 
   pt.write(new Buffer('bazy'));
   console.error('should have emitted, but not again');
   pt.write(new Buffer('kuel'));
 
-  console.error('should have emitted readable now 1 === %d', emits);
-  t.equal(emits, 1);
+  console.error('should have emitted readable now 2 === %d', emits);
+  t.equal(emits, 2);
 
   t.equal(pt.read(5).toString(), 'arkba');
   t.equal(pt.read(5).toString(), 'zykue');
   t.equal(pt.read(5), null);
 
-  console.error('need emit 1');
+  console.error('need emit 2');
 
   pt.end();
 
-  t.equal(emits, 2);
+  t.equal(emits, 3);
 
   t.equal(pt.read(5).toString(), 'l');
   t.equal(pt.read(5), null);
 
   console.error('should not have emitted again');
-  t.equal(emits, 2);
+  t.equal(emits, 3);
   t.end();
 });
 
@@ -256,25 +300,28 @@ test('passthrough event emission reordered', function(t) {
   });
 
   pt.write(new Buffer('foog'));
+  console.error('need emit 0');
   pt.write(new Buffer('bark'));
+  console.error('should have emitted readable now 1 === %d', emits);
+  t.equal(emits, 1);
 
   t.equal(pt.read(5).toString(), 'foogb');
   t.equal(pt.read(5), null);
 
-  console.error('need emit 0');
+  console.error('need emit 1');
   pt.once('readable', function() {
     t.equal(pt.read(5).toString(), 'arkba');
 
     t.equal(pt.read(5), null);
 
-    console.error('need emit 1');
+    console.error('need emit 2');
     pt.once('readable', function() {
       t.equal(pt.read(5).toString(), 'zykue');
       t.equal(pt.read(5), null);
       pt.once('readable', function() {
         t.equal(pt.read(5).toString(), 'l');
         t.equal(pt.read(5), null);
-        t.equal(emits, 3);
+        t.equal(emits, 4);
         t.end();
       });
       pt.end();
@@ -311,4 +358,84 @@ test('passthrough facaded', function(t) {
       }, 10);
     }, 10);
   }, 10);
+});
+
+test('object transform (json parse)', function(t) {
+  console.error('json parse stream');
+  var jp = new Transform({ objectMode: true });
+  jp._transform = function(data, output, cb) {
+    try {
+      output(JSON.parse(data));
+      cb();
+    } catch (er) {
+      cb(er);
+    }
+  };
+
+  // anything except null/undefined is fine.
+  // those are "magic" in the stream API, because they signal EOF.
+  var objects = [
+    { foo: 'bar' },
+    100,
+    "string",
+    { nested: { things: [ { foo: 'bar' }, 100, "string" ] } }
+  ];
+
+  var ended = false;
+  jp.on('end', function() {
+    ended = true;
+  });
+
+  objects.forEach(function(obj) {
+    jp.write(JSON.stringify(obj));
+    var res = jp.read();
+    t.same(res, obj);
+  });
+
+  jp.end();
+
+  process.nextTick(function() {
+    t.ok(ended);
+    t.end();
+  })
+});
+
+test('object transform (json stringify)', function(t) {
+  console.error('json parse stream');
+  var js = new Transform({ objectMode: true });
+  js._transform = function(data, output, cb) {
+    try {
+      output(JSON.stringify(data));
+      cb();
+    } catch (er) {
+      cb(er);
+    }
+  };
+
+  // anything except null/undefined is fine.
+  // those are "magic" in the stream API, because they signal EOF.
+  var objects = [
+    { foo: 'bar' },
+    100,
+    "string",
+    { nested: { things: [ { foo: 'bar' }, 100, "string" ] } }
+  ];
+
+  var ended = false;
+  js.on('end', function() {
+    ended = true;
+  });
+
+  objects.forEach(function(obj) {
+    js.write(obj);
+    var res = js.read();
+    t.equal(res, JSON.stringify(obj));
+  });
+
+  js.end();
+
+  process.nextTick(function() {
+    t.ok(ended);
+    t.end();
+  })
 });
